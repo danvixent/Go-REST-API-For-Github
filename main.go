@@ -31,6 +31,8 @@ func main() {
 	http.ListenAndServe(":8080", nil)
 }
 
+
+// fetch() fetches the data from GitHub P.S:The maximum it can fetch is 100 records due to GitHub's Pagination
 func fetch(w http.ResponseWriter, r *http.Request) {
 	url := "https://api.github.com/search/repositories?q=user:@&per_page=100"
 
@@ -62,6 +64,7 @@ func fetch(w http.ResponseWriter, r *http.Request) {
 	sendData(&data, user, &w)
 }
 
+// sendData() sends the data to the client using a buffer
 func sendData(data *JSONData, user string, w *http.ResponseWriter) {
 
 	t := template.New("Response Data")
