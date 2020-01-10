@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
@@ -31,7 +32,6 @@ func main() {
 	http.ListenAndServe(":8080", nil)
 }
 
-
 // fetch() fetches the data from GitHub P.S:The maximum it can fetch is 100 records due to GitHub's Pagination
 func fetch(w http.ResponseWriter, r *http.Request) {
 	url := "https://api.github.com/search/repositories?q=user:@&per_page=100"
@@ -45,16 +45,42 @@ func fetch(w http.ResponseWriter, r *http.Request) {
 		log.Fatal(getErr)
 	}
 	data := JSONData{}
-	//fmt.Println(res.Header)
-	//fmt.Println("----------------------------------")
 	if err := json.NewDecoder(res.Body).Decode(&data); err != nil {
 		log.Fatal(err)
+	}
+
+	if data.Count > 100 {
+		num := (data.Count / 100)
+		if data.Count%100 != 0 {
+			num++
+		}
+		fmt.Println("num = ", num)
+		for i := 2; i <= num; i++ {
+			page := url + "&page=@"
+
+			page = strings.Replace(page, "@", strconv.Itoa(i), 1)
+			rest, err := http.Get(page)
+			fmt.Println("Gotten page", i, "url=", page)
+			if err != nil {
+				log.Fatal(err)
+			}
+			tmp := JSONData{}
+			if err := json.NewDecoder(rest.Body).Decode(&tmp); err == nil {
+				ref := &data
+				for ix := range tmp.Items {
+					ref.Items = append(ref.Items, tmp.Items[ix])
+				}
+			} else {
+				log.Fatal(err)
+			}
+		}
 	}
 
 	for i := range data.Items {
 		r := &data.Items[i]
 		if format, err := time.Parse(time.RFC3339, r.CreatedAt); err == nil {
-			ref := strconv.Itoa(format.Year()) + " " + format.Month().String() + " " + strconv.Itoa(format.Hour()) + ":" + strconv.Itoa(format.Minute()) + ":" + strconv.Itoa(format.Second())
+			ref := strconv.Itoa(format.Year()) + " " + format.Month().String() + " " +
+				strconv.Itoa(format.Hour()) + ":" + strconv.Itoa(format.Minute()) + ":" + strconv.Itoa(format.Second())
 			r.CreatedAt = ref
 		} else {
 			log.Fatal(err)
