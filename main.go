@@ -7,23 +7,32 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-// Item is the single repository data structure consisting of **only the data i need**
+//URL is the github api request url
+const URL = "https://api.github.com/search/repositories?q=user:@&per_page=100"
+
+var wait sync.WaitGroup
+
+// Item is the single repository data structure consisting of **only the data needed**
 type Item struct {
 	FullName    string `json:"full_name"`
 	Description string `json:"description"`
 	CreatedAt   string `json:"created_at"`
 }
 
-// JSONData contains the GitHub API response
-type JSONData struct {
-	Count    int `json:"total_count"`
-	Username string
-	Items    []Item
+// GitResponse contains the GitHub API response
+type GitResponse struct {
+	sync.Mutex        //Multiple goroutines will access the Items field
+	Count      int    `json:"total_count"`
+	Username   string `json:"username"`
+	Items      []Item `json:"items"`
 }
 
 func main() {
@@ -32,52 +41,35 @@ func main() {
 	http.ListenAndServe(":8080", nil)
 }
 
-// fetch() fetches the data from GitHub P.S:The maximum it can fetch is 100 records due to GitHub's Pagination
+// fetch() fetches the data from GitHub and paginates if neccessary
 func fetch(w http.ResponseWriter, r *http.Request) {
-	url := "https://api.github.com/search/repositories?q=user:@&per_page=100"
+	usr := r.FormValue("firstname")
+	url := strings.Replace(URL, "@", usr, 1)
 
-	user := r.FormValue("firstname")
-
-	url = strings.Replace(url, "@", user, 1)
-
-	res, getErr := http.Get(url)
-	if getErr != nil {
-		log.Fatal(getErr)
-	}
-	data := JSONData{}
-	if err := json.NewDecoder(res.Body).Decode(&data); err != nil {
+	res, err := http.Get(url)
+	if err != nil {
 		log.Fatal(err)
 	}
 
-	if data.Count > 100 {
-		num := (data.Count / 100)
-		if data.Count%100 != 0 {
-			num++
+	resp := &GitResponse{}
+	if err = json.NewDecoder(res.Body).Decode(resp); err == nil {
+		if resp.Count > 100 {
+			Paginate(resp, url)
 		}
-		fmt.Println("num = ", num)
-		for i := 2; i <= num; i++ {
-			page := url + "&page=@"
-
-			page = strings.Replace(page, "@", strconv.Itoa(i), 1)
-			rest, err := http.Get(page)
-			fmt.Println("Gotten page", i, "url=", page)
-			if err != nil {
-				log.Fatal(err)
-			}
-			tmp := JSONData{}
-			if err := json.NewDecoder(rest.Body).Decode(&tmp); err == nil {
-				ref := &data
-				for ix := range tmp.Items {
-					ref.Items = append(ref.Items, tmp.Items[ix])
-				}
-			} else {
-				log.Fatal(err)
-			}
-		}
+		fmtDates(resp)
+		resp.Username = usr
+		sort.SliceStable(resp.Items, func(i, j int) bool { //sort the repos by name
+			return resp.Items[i].FullName < resp.Items[j].FullName
+		})
+		sendResp(resp, &w)
+		return
 	}
+	log.Fatal(err)
+}
 
-	for i := range data.Items {
-		r := &data.Items[i]
+func fmtDates(resp *GitResponse) {
+	for i := range resp.Items {
+		r := &(resp.Items[i])
 		if format, err := time.Parse(time.RFC3339, r.CreatedAt); err == nil {
 			ref := strconv.Itoa(format.Year()) + " " + format.Month().String() + " " +
 				strconv.Itoa(format.Hour()) + ":" + strconv.Itoa(format.Minute()) + ":" + strconv.Itoa(format.Second())
@@ -86,13 +78,48 @@ func fetch(w http.ResponseWriter, r *http.Request) {
 			log.Fatal(err)
 		}
 	}
-	data.Username = user
-	sendData(&data, user, &w)
 }
 
-// sendData() sends the data to the client using a buffer
-func sendData(data *JSONData, user string, w *http.ResponseWriter) {
+//Paginate goes through each page up till the end
+func Paginate(resp *GitResponse, url string) {
+	num := (resp.Count / 100) //compute number pages to request for
+	if resp.Count%100 != 0 {  //if the number of repos isn't a multiple of 100, one more page will be needed
+		num++
+	}
+	//spawn new goroutines to decode each page
+	for i := 2; i <= num; i++ {
+		url = url + "&page=" + strconv.Itoa(i)
+		fmt.Println("Gotten page", i, "url=", url)
+		go decodePage(url, resp)
+		wait.Add(1)
+	}
+	wait.Wait()
+}
 
+//decodePage gets the page and decodes it into resp
+func decodePage(url string, resp *GitResponse) {
+	defer wait.Done()
+	defer runtime.Goexit()
+
+	res, err := http.Get(url)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	tmp := GitResponse{}
+	if err = json.NewDecoder(res.Body).Decode(&tmp); err == nil {
+		for ix := range tmp.Items {
+			resp.Lock() //necessary because of concurrency
+			resp.Items = append(resp.Items, tmp.Items[ix])
+			resp.Unlock()
+		}
+		return
+	}
+	fmt.Println(err)
+}
+
+// sendResp() sends the data to the client using a buffer
+func sendResp(data *GitResponse, w *http.ResponseWriter) {
 	t := template.New("Response Data")
 	t, _ = t.Parse(`
     <p>
@@ -119,8 +146,7 @@ func sendData(data *JSONData, user string, w *http.ResponseWriter) {
 	`)
 
 	buf := new(bytes.Buffer)
-	t.Execute(buf, *data)
-	tmp := *w
-	tmp.Write(buf.Bytes())
-	tmp.(http.Flusher).Flush()
+	t.Execute(buf, data) //*data
+	(*w).Write(buf.Bytes())
+	(*w).(http.Flusher).Flush()
 }

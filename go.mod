@@ -1,3 +1,3 @@
-module api-test
+module github.com/danvixent/Go-REST-API-For-Github
 
-go 1.13
+go 1.14
